@@ -23,11 +23,32 @@ class AuthController extends Controller
             'email' => $request->email,
             'password' => Hash::make($request->password),
             'otp' => Str::random(6),
+            'otp_expires_at' => now()->addMinute(1), // Sesuaikan dengan kadaluarsa yang diinginkan
         ]);
+
+        Log::info('User created: ' . json_encode($user->toArray()));
+
+        // Log the saved user details
+        Log::info('User saved successfully after registration.');
 
         $this->sendOtpEmail($user);
 
-        return response()->json(['message' => 'Registration successful. OTP sent to your email.']);
+        if ($user->otp_expires_at < now()) {
+            // Tandai OTP sebagai kedaluwarsa dan tolak verifikasi
+            $user->otp = null;
+            $user->save();
+
+            return response()->json(['error' => 'Invalid OTP or expired.'], 401);
+        }
+
+        $expiresAt = $user->otp_expires_at->toIso8601String(); // Format waktu sesuai kebutuhan
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Registration successful. OTP sent to ' . $user->email,
+            'email' => $user->email,
+            'expires_at' => $expiresAt,
+        ]);
     }
 
     public function login(Request $request)
@@ -37,18 +58,44 @@ class AuthController extends Controller
         $user = User::where('email', $request->email)->first();
 
         if (!$user || !Hash::check($request->password, $user->password)) {
-            return response()->json(['error' => 'Invalid email or password.'], 401);
+            return response()->json([
+                'status' => 'error',
+                'error' => 'Invalid email or password.'
+            ], 401);
         }
 
+        // Generate dan kirim OTP baru
         $otp = Str::random(6);
         $user->otp = $otp;
-        $user->save();
+        $user->otp_expires_at = now()->addMinute(1); // Sesuaikan dengan kadaluarsa yang dinginkan 
 
-        $this->sendOtpEmail($user);
+        // Check if the user is saved successfully
+        if ($user->save()) {
+            // Log the saved user details
+            Log::info('User logged in successfully: ' . json_encode($user->toArray()));
 
-        return response()->json(['message' => 'Login successful. OTP sent to your email.']);
+            $this->sendOtpEmail($user);
+
+            $expiresAt = $user->otp_expires_at->toIso8601String(); // Format waktu sesuai kebutuhan
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Login successful. OTP sent to ' . $user->email,
+                'email' => $user->email,
+                'expires_at' => $expiresAt,
+            ]);
+        } else {
+            // Log if there's an issue with saving
+            Log::error('Failed to log in user: ' . json_encode($user->toArray()));
+
+            return response()->json([
+                'status' => 'error',
+                'error' => 'An error occurred while processing the request.'
+            ], 500);
+        }
     }
 
+    // Metode untuk mengirimkan email OTP
     protected function sendOtpEmail($user)
     {
         $otp = $user->otp;
@@ -69,7 +116,16 @@ class AuthController extends Controller
 
             return response()->json(['error' => 'Invalid OTP.'], 401);
         }
+        // Pemeriksaan waktu kadaluarsa sebelum verifikasi OTP
+        if ($user->otp_expires_at < now()) {
+            // Tandai OTP sebagai kedaluwarsa dan tolak verifikasi
+            $user->otp = null;
+            $user->save();
 
+            return response()->json(['error' => 'OTP expired..'], 401);
+        }
+
+        // Proses verifikasi OTP
         $token = $user->createToken('otp-token')->plainTextToken;
 
         // Clear OTP setelah verifikasi
